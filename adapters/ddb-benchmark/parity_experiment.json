@@ -1,0 +1,22 @@
+[
+  {
+    "adapter_name": "ddb-benchmark",
+    "status": "not_run",
+    "reason": "No reference applications or original-platform comparison runs are supplied.",
+    "agent": null,
+    "model": null,
+    "date": null,
+    "number_of_runs": 0,
+    "adapter_pr": null,
+    "dataset_pr": null,
+    "parity_pr": null,
+    "metrics": [
+      {
+        "benchmark_name": "DDB",
+        "metric": "weighted_func_score",
+        "original": null,
+        "harbor": null
+      }
+    ]
+  }
+]

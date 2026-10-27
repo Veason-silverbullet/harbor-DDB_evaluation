@@ -1,0 +1,58 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Pet Store Probe API",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {"url": "https://httpbin.org"}
+  ],
+  "paths": {
+    "/pet/{petId}": {
+      "get": {
+        "operationId": "getPetById",
+        "summary": "Get a pet by identifier",
+        "parameters": [{
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {"type": "string"}
+        }],
+        "responses": {"200": {"description": "Pet returned"}}
+      },
+      "delete": {
+        "operationId": "deletePetById",
+        "summary": "Delete a pet by identifier",
+        "parameters": [{
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {"type": "string"}
+        }],
+        "responses": {"200": {"description": "Pet deleted"}}
+      }
+    },
+    "/pet": {
+      "post": {
+        "operationId": "createPet",
+        "summary": "Create a pet",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "species": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "Pet created"}}
+      }
+    }
+  }
+}

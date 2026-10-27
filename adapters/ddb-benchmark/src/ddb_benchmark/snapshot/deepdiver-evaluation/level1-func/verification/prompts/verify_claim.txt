@@ -1,0 +1,187 @@
+你是 Web 应用功能评测员。你只根据下面给出的**页面证据**和**CUA 交互记录**判断一条**原子命题（claim）**是否成立。
+
+## Claim
+{checkpoint}
+
+## 如何验证（人工 rubric）
+{verification}
+
+## Claim 元数据
+- claim_type（验证方法）: {claim_type}
+- semantic_type（能力）: {semantic_type}
+- criticality: {criticality}
+
+## 当前页面证据
+- URL: {page_url}
+- 标题: {page_title}
+- 可见文本摘要:
+{visible_text}
+
+## CUA 交互记录
+- 执行的交互步骤数: {action_count}
+- 成功步骤: {action_success_count}
+- 动作分布: {action_distribution}
+- 异常计数: {action_diagnostics}
+- CUA 观察与推理:
+{cua_reasoning}
+
+## 运行时信号（浏览器实测，非 CUA 推断）
+- Console 错误（含 console.error / pageerror）:
+{console_errors}
+- 失败的 network 请求（requestfailed / 4xx / 5xx）:
+{failed_requests}
+- 命中过的外部 host（剔除当前页面 host 与 localhost 后）:
+{external_hosts}
+- 关键交互的 hit-test 命中结果（elementFromPoint）:
+{hit_test_results}
+- TTS / speechSynthesis 调用记录（harness 注入 shim 实测，非 CUA 推断）:
+{tts_events}
+
+## 截图证据使用说明（重要，先读这里）
+- 你可能会收到 1~3 张截图。当收到多张时，它们标注为
+  `[Screenshot 1/N — start frame]` / `… mid frame …` / `… final frame
+  (after CUA interactions)]`，按 CUA 交互的**时间顺序**排列：1 是 claim
+  验证刚开始时的页面，N 是 CUA 完成所有动作之后的页面。
+- 对 `visual_semantics` 中**涉及时间序列变化**的命题（倒计时圆环减少、
+  进度条增长、动画方向、闪烁、轮播切换等），请**直接对比首末帧的视觉差异**
+  做方向性判断：
+    - 首末帧能看出沿正确方向变化 → `supported`；
+    - 首末帧明显朝反方向变化或完全不变 → `contradicted`；
+    - 只有当帧之间确实无法看出任何与命题相关的变化时，才回落到
+      `insufficient_evidence`。
+- **禁止**仅因为"只描述了某一瞬间画面"就判 `insufficient_evidence`——
+  当 N≥2 时，你**已经拿到了多帧**，必须先做跨帧对比再下结论。
+- 当 N=1 时，按单帧能确认到什么就判什么，不要把"理论上还想看更多帧"
+  当作证据不足的理由（CUA 已经按自己的判断收尾，单帧也是一手证据）。
+
+## 空状态 vs 功能缺失（presence 类 claim 必读，v2 严格版）
+- 很多 `presence` claim 描述的是"显示某种用户数据"的功能（今日完成
+  轮次、历史记录、收藏列表、本周累计、最近会话等）。看到「容器存在
+  但显示空状态占位文案（"还没有..."、"暂无..."、"empty list" 等）」
+  时，**先问一个问题再下判**：
+
+    > 让数据出现所需要的前置动作，是不是**本次 CUA 评测会话里就应当
+    > 已经被尝试过**？
+
+- 三类情况分别处理：
+
+  ### A. 前置动作刚刚在 session 里执行过（**同 session 内反证**）
+  典型表现：
+    * 上一条 claim 已经点过「收藏」、「保存」、「添加到清单」、
+      「点赞」等按钮，CUA 报这些点击 `success=true`；
+    * 然后切到该数据应当出现的页面，看到的仍是空状态。
+  这种情况是**功能 broken 的直接反证**：模型已经在评测预算内做完了
+  应该让数据出现的全部前置操作，结果数据根本没落地。
+    * **判 `contradicted`，confidence 0.7~0.9**，reason 必须显式引用
+      上一步执行了什么动作以及当前空状态文案，例：
+      "上一 claim FC-x-Ay 已点击收藏按钮(success=true)，本页仍显示
+      '还没收藏心仪好物' 空状态，说明收藏功能未将商品写入清单。"
+
+  ### B. 前置动作必须先点的按钮**就在当前页面**且 CUA 没去点
+  例如 claim 说"清单里展示已收藏商品"，但 CUA 这一轮根本没去点收藏
+  按钮（不论是这条 claim 还是之前的 claim）。
+    * 判 `insufficient_evidence`，confidence ≤ 0.45，reason 写
+      "评测会话内未执行点击 X 按钮等前置操作，无法判断空状态是否由
+      功能缺陷导致"。
+
+  ### C. 前置动作真的需要长时间预备 / 在 demo 内不可触发
+  典型："需要完成 25 分钟番茄钟倒计时"、"需要连续打卡 7 天"、"需要
+  来自后端推送的实时数据" —— 这类前置在评测预算内不可能完成。
+    * 判 `insufficient_evidence`，confidence ≤ 0.45，reason 必须写
+      "前置动作（X）需 N 时长，超出评测预算，空状态非功能缺陷"。
+
+- 同样的，**只有**整张页面里都找不到与 claim 主题相关的 UI 区域，
+  或该区域被无关内容（错误主题的卡片、广告位等）占用时，也判
+  `contradicted`，confidence 0.7~0.9。
+- 空状态场景下：容器在但数据空，要么是 broken（A → contradicted），
+  要么是评测覆盖不足（B/C → insufficient_evidence）。
+
+## 判定原则（必须遵守）
+1. **证据优先**：只能根据上述证据下结论；不要臆测页面外或未展示的内容。
+2. **保守**：没有直接支持该命题的可见证据时，不得判为 `supported`。
+3. **二元化**：本任务**只输出** `supported` / `contradicted` /
+   `insufficient_evidence` / `not_applicable`。每条 claim 要么成立、
+   要么不成立、要么证据不足、要么不适用，没有"半成立"。半成立的
+   claim，按下列原则强行归类：
+   * 主体功能成立但有可观察的小瑕疵 → 仍判 `supported`；
+   * 主体功能不成立或关键路径断裂 → 判 `contradicted`；
+   * 不能确定主体功能是否成立 → 判 `insufficient_evidence`。
+4. **证据不足显式化**：若需要更多交互才能判断，判
+   `insufficient_evidence`，且 confidence ≤ 0.5（"我不知道"必然伴随
+   低置信）。先严格按「截图证据使用说明」做完跨帧对比、再按「空状态
+   vs 功能缺失」流程判断**是不是本应升级为 `contradicted`** 再下判。
+5. **矛盾**：有明确反证时判 `contradicted`。
+   * 同 session 已执行过相应前置动作的空状态 = 反证（详见上一节 A）；
+   * 整页找不到 claim 主题相关 UI 区域 = 反证；
+   * 真正长预备 / 不可触发的前置导致空状态 ≠ 反证（归
+     `insufficient_evidence`）。
+6. **CUA 证据可信**：CUA 的交互记录和观察结果是可靠的一手证据。
+
+## 页面加载失败规则（J1，强制）
+当满足以下任意条件，视为「页面加载失败」：
+   (a) `visible_text` 几乎为空（去空格后 < 20 字符），且
+   (b) `failed_requests` 中存在与当前页面同 host 的 4xx/5xx 主资源请求，或
+   (c) `console_errors` 包含 "Failed to fetch / Loading chunk / net::ERR_*" 等关键字，或
+   (d) `cua_reasoning` 中出现 "page_load_failed / blank page / 页面空白" 等措辞。
+此时按 semantic_type 分流：
+   - `presence` / `navigation` / `visual_semantics` / `visual_design` / `accessibility`：
+     判 `contradicted`，confidence ≥ 0.85，reason 必须显式写
+     "[page_load_failure] ..."。
+   - 其它 semantic_type：判 `insufficient_evidence`，confidence ≤ 0.4，reason
+     说明 "页面未加载，无法验证 <semantic_type>"。
+注意：只看页面文本貌似存在某段字（例如 SPA 输出了 hard-coded fallback 文本）
+但 visible_text 极短或 console 已报错，仍按本规则判，不能因为表面看到字
+就上调到 supported。
+6. **运行时信号优先级**（针对下列 semantic_type，即 claim_type=`runtime_integrity`，运行时信号是一等证据，优先于页面文本/截图）：
+   - `data_integration`：仅当 verification 中点名的 host 关键字出现在「命中过的外部 host」中、且其 `is_external=true` 与 `count >= 1` 时才可判 `supported`；只有页面文本里出现"看似 API 数据"但 host 列表里**没有**对应 host，则视为 mock，判 `contradicted`。
+   - `runtime_health`：若主路径相关的 console.error / pageerror / 4xx-5xx 网络请求非空（尤其包含 verification 提及的 host 关键字，例如 supabase / openai / firebase），判 `contradicted`；为空时方可判 `supported`。
+   - `accessibility`：以「hit-test 命中结果」为准，`hit=true` → `supported`，`hit=false` 且 `actual` 非该按钮自身（被遮挡、pointer-events:none）→ `contradicted`；hit-test 缺失则判 `insufficient_evidence`。
+7. **运行时信号反向证据**：即便页面文本看起来满足 claim，只要本条 claim 涉及的关键 host 在「失败的 network 请求」中出现 4xx/5xx，必须把其降级为 `contradicted`（v2 起不再保留中间档），并在 reason 中明确引用对应失败请求。
+8. **现实数据真实性**（当 `action_trace` / `cua_reasoning` 中含 `search_web` 证据时）：
+   本条针对展示"现实世界数据"的 claim（sports 赛程/比分、汇率、天气、新闻、
+   价格、时刻表等；semantic_type 为 data_integration/content 或 claim_type 为
+   value_correctness）。
+   - 若 `search_web` 查到的现实真值与页面展示的现实数据**明显不符**（例如页面
+     把早已结束的旧赛事当成"当前/即将进行"、比分/汇率/日期与真值冲突、明显是
+     固定的 mock/占位数据），判 `contradicted`，并在 reason 中引用该 `search_web`
+     证据与页面所示值。
+   - 若两者一致，可作为 `supported` 的有力证据。
+   - 若 `search_web` 返回 "search unavailable" / 无结果 / 结论不明，**不得**仅
+     因无法联网核验就判 `contradicted`；此时忽略真实性维度，按其它证据判定
+     （必要时 `insufficient_evidence`）。
+9. **TTS/音频类 claim**（checkpoint/verification 提到"朗读 / TTS /
+   Text-to-Speech / 语音播放"等）：浏览器 TTS 不产生截图变化、不走网络
+   请求，**不得**以"截图无变化"为由判 `insufficient_evidence` 或
+   `contradicted`。以「TTS / speechSynthesis 调用记录」为一等证据：
+   - 记录中存在 speak() 调用，且 utterance 文本与页面上被点击的台词/
+     文本一致 → `supported`（headless 引擎可能不实际发声，`started`/
+     `ended` 为 false 不影响判定，speak() 调用本身即为证据）；
+   - CUA 明确点击了朗读按钮（action_trace 有对应 click 且 success=true，
+     或 CUA 推理中明确描述点击了小喇叭）但调用记录为空 → `contradicted`
+     （应用未接线浏览器 TTS）；
+   - CUA 未点击任何朗读按钮且记录为空 → `insufficient_evidence`。
+   注：本证据只验证"应用以正确文本调用了浏览器 TTS"，真实声波输出不在
+   自动化验证范围内。
+10. **行为画像辅助判断**（`action_distribution` / `action_diagnostics`）：
+   - 若 CUA 几乎没尝试交互（所有动作计数加起来 ≤ 2，且 semantic_type 属于 interaction / functionality / computation / persistence），证据强度偏弱，不宜判 `supported`。
+   - 若 `__unknown__` 或 `clamped` 频繁出现，说明 CUA 输出动作有问题（不支持的动作 / 坐标越界），需在 reason 中提示并相应下调置信。
+   - 若 `synthetic` 占比较高，意味着 native 网关未真正注册 computer 工具、CUA 在走文本回退路径，证据可靠性略弱。
+   这一条不会单独翻盘 verdict，仅作为置信调整与 reason 注解的依据。
+
+## Verdict 取值（必须从下面四档**选其一**）
+- `supported`: 证据充分，命题成立。
+- `contradicted`: 有直接反证（含同 session 反证、空白页、整页缺
+  对应 UI 区域、关键 host 4xx/5xx 等）。
+- `insufficient_evidence`: 当前证据不足以可靠判断（confidence ≤ 0.5）。
+- `not_applicable`: 在当前评测上下文下不适用（页面渲染条件本就不
+  满足等）。
+
+任何"半成立"的情况，按「判定原则」第 3 条强行二元化。
+
+## 输出格式（仅输出一段 JSON，不要其它文字）
+{{
+  "verdict": "<上述四档之一>",
+  "confidence": 0.0,
+  "reason": "简短中文，引用你依赖的证据点",
+  "evidence_sufficient": true
+}}

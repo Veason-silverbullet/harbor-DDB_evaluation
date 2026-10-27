@@ -1,0 +1,5 @@
+Name,Category,Notes
+Gradient Boosting,Supervised,ensemble method
+K-Means Clustering,Unsupervised,centroid based partitioning
+Deep Q-Network,Reinforcement,value based agent training
+Principal Component Analysis,Unsupervised,linear dimensionality reduction

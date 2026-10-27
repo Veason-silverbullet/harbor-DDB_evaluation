@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.0",
+  "type": "finite-state-machine",
+  "projectName": "Imported Ticket Flow",
+  "description": "A simple ticket lifecycle state machine for import testing.",
+  "states": [
+    {
+      "id": "New",
+      "name": "New",
+      "initial": true,
+      "final": false,
+      "x": 80,
+      "y": 120
+    },
+    {
+      "id": "InReview",
+      "name": "InReview",
+      "initial": false,
+      "final": false,
+      "x": 300,
+      "y": 120
+    },
+    {
+      "id": "Closed",
+      "name": "Closed",
+      "initial": false,
+      "final": true,
+      "x": 520,
+      "y": 60
+    },
+    {
+      "id": "Cancelled",
+      "name": "Cancelled",
+      "initial": false,
+      "final": true,
+      "x": 520,
+      "y": 200
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t1",
+      "source": "New",
+      "target": "InReview",
+      "event": "review",
+      "priority": 1,
+      "action": "Assign ticket to a reviewer and start review."
+    },
+    {
+      "id": "t2",
+      "source": "InReview",
+      "target": "Closed",
+      "event": "close",
+      "priority": 2,
+      "action": "Mark ticket as resolved and notify reporter.",
+      "guard": {
+        "field": "amount",
+        "operator": ">=",
+        "value": 100
+      }
+    },
+    {
+      "id": "t3",
+      "source": "InReview",
+      "target": "Cancelled",
+      "event": "cancel",
+      "priority": 3,
+      "action": "Cancel the ticket and record the reason."
+    },
+    {
+      "id": "t4",
+      "source": "New",
+      "target": "Cancelled",
+      "event": "cancel",
+      "priority": 4,
+      "action": "Cancel a newly created ticket before review."
+    }
+  ]
+}

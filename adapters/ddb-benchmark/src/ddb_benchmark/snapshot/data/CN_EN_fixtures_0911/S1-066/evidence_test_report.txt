@@ -1,0 +1,12 @@
+Auth v2 endpoint test run
+=========================
+Date: 2024-06-12
+Environment: staging
+
+PASS login endpoint
+PASS token refresh
+PASS logout endpoint
+PASS password reset
+FAIL load test - not executed
+
+Summary: 4 passed, 1 failed, 5 total

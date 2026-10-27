@@ -1,0 +1,28 @@
+[project]
+name = "harbor-ddb-benchmark-adapter"
+version = "0.1.0"
+description = "Generate Harbor tasks from a bundled DDB benchmark snapshot."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["harbor"]
+
+[project.scripts]
+ddb-benchmark = "ddb_benchmark.main:main"
+ddb-benchmark-snapshot = "ddb_benchmark.snapshot:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ddb_benchmark"
+
+[tool.uv.sources]
+harbor = { path = "../..", editable = true }
+
+[dependency-groups]
+dev = ["ruff>=0.15.17", "ty>=0.0.49"]
+
+# Keep routine formatting from changing the snapshot's recorded hashes.
+[tool.ruff]
+extend-exclude = ["src/ddb_benchmark/snapshot"]

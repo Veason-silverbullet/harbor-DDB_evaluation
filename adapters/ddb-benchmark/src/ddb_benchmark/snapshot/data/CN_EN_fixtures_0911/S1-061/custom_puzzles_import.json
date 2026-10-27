@@ -1,0 +1,22 @@
+{
+  "puzzles": [
+    {
+      "id": "cp-001",
+      "type": "emoji",
+      "emoji": "🚧️🏹",
+      "answer": "Rainbow",
+      "hint": "QA61 - Appears in the sky after the rain",
+      "category": "Nature (QA61)",
+      "difficulty": "easy"
+    },
+    {
+      "id": "cp-002",
+      "type": "emoji",
+      "emoji": "🐝🎬",
+      "answer": "Bee Movie",
+      "hint": "QA61 - Animated film about a buzzing insect",
+      "category": "Movies (QA61)",
+      "difficulty": "medium"
+    }
+  ]
+}

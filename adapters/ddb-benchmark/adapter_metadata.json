@@ -1,0 +1,30 @@
+[
+  {
+    "adapter_name": "ddb-benchmark",
+    "adapter_builders": ["Codex (local workspace integration)"],
+    "original_benchmark": [
+      {
+        "split": "CN_EN_50_50_v4_atomic_stage1-3_0911",
+        "size": 100,
+        "harness": "agent",
+        "supported_agents": ["DeepDiver"],
+        "adaptable": true,
+        "notes": "Local DDB_evaluation snapshot; 3396 atomic claims."
+      }
+    ],
+    "harbor_adapter": [
+      {
+        "split": "CN_EN_50_50_v4_atomic_stage1-3_0911",
+        "adapted_benchmark_size": 100,
+        "parity_benchmark_size": 0,
+        "parity_sampling_rate": 0.0,
+        "registry_benchmark_size": 0,
+        "added_agents": ["codex"],
+        "parity_matching_agents": [],
+        "parity_unmatching_agents": null,
+        "parity_costs": null,
+        "notes": "Reuses upstream evaluator and v2 scorer. No parity experiment. Three tasks require missing upstream fixtures; hosted identity provisioning is replaced by local browser sessions."
+      }
+    ]
+  }
+]

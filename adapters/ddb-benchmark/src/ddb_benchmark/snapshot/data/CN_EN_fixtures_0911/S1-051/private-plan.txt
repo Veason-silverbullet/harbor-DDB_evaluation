@@ -1,0 +1,5 @@
+Internal Project Plan
+Document ID: OC-S051-PRIVATE-8W6J
+Draft milestone: prepare an internal design review for the next project phase.
+Planning note: consolidate open issues before inviting external reviewers.
+Internal reference: OC-S051-PLAN-2H7C

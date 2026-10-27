@@ -1,0 +1,12 @@
+jobs_dir: jobs
+n_attempts: 1
+orchestrator:
+  type: local
+  n_concurrent_trials: 1
+environment:
+  type: docker
+  delete: true
+agents:
+  - name: codex
+datasets:
+  - path: datasets/ddb-benchmark

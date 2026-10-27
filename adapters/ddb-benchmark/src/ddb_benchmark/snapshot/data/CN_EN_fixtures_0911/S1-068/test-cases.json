@@ -1,0 +1,39 @@
+{
+  "test_set_id": "TITLE-REGRESSION-SET-01",
+  "instructions": "Use the same cases unchanged for all versions. Enter cases through the app UI if no compatible JSON import exists. Compare parsed JSON values, not whitespace or object key order. These are expected results, not observed app execution results.",
+  "cases": [
+    {
+      "id": "TC-01",
+      "input": {
+        "title": "Green Tea Guide"
+      },
+      "expected_output": {
+        "status": "ok",
+        "title": "Green Tea Guide",
+        "word_count": 3
+      }
+    },
+    {
+      "id": "TC-02",
+      "input": {
+        "title": "  tea guide  "
+      },
+      "expected_output": {
+        "status": "ok",
+        "title": "tea guide",
+        "word_count": 2
+      }
+    },
+    {
+      "id": "TC-03",
+      "input": {
+        "title": "   "
+      },
+      "expected_output": {
+        "status": "needs_input",
+        "title": "",
+        "word_count": 0
+      }
+    }
+  ]
+}

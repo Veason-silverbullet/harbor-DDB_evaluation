@@ -1,0 +1,21 @@
+team,decimal_odds,wins,draws,losses,goals_for,goals_against,points
+Arsenal,5.50,24,8,6,78,34,80
+Manchester City,4.25,25,6,7,82,38,81
+Liverpool,6.00,23,9,6,75,36,78
+Chelsea,10.00,20,8,10,68,45,68
+Manchester United,15.00,18,9,11,61,49,63
+Tottenham Hotspur,18.00,18,7,13,66,55,61
+Newcastle United,22.00,17,8,13,62,50,59
+Aston Villa,25.00,16,9,13,58,51,57
+Brighton & Hove Albion,35.00,14,10,14,55,52,52
+West Ham United,40.00,13,9,16,52,58,48
+Crystal Palace,45.00,,,,,,
+Brentford,55.00,12,8,18,49,60,44
+Fulham,,12,7,19,48,59,43
+Everton,65.00,11,9,18,42,54,42
+Wolverhampton Wanderers,70.00,10,9,19,41,57,39
+Bournemouth,75.00,10,8,20,44,65,38
+Nottingham Forest,80.00,9,9,20,40,62,36
+Leicester City,85.00,8,8,22,38,68,32
+Southampton,90.00,6,7,25,31,72,25
+Arsenal,5.75,23,9,6,76,35,78

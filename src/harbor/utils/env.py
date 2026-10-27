@@ -1,0 +1,247 @@
+import os
+import re
+from collections.abc import Callable, Collection
+
+_TEMPLATE_PATTERN = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
+_EMBEDDED_TEMPLATE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_SENSITIVE_KEY_RE = re.compile(
+    r"(KEY|SECRET|TOKEN(?!S)|PASSWORD|CREDENTIAL|AUTH)", re.IGNORECASE
+)
+_AUTH_SCHEME = r"[A-Za-z]+"
+_TRUE_BOOL_VALUES = frozenset({"true", "1", "yes"})
+_FALSE_BOOL_VALUES = frozenset({"false", "0", "no"})
+
+
+def parse_bool_env_value(
+    value: str | bool | None,
+    *,
+    name: str = "value",
+    default: bool | None = None,
+) -> bool:
+    """Parse a string environment-style boolean value."""
+    if value is None:
+        if default is not None:
+            return default
+        raise ValueError(f"Invalid value for '{name}': expected bool, got None")
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_BOOL_VALUES:
+            return True
+        if normalized in _FALSE_BOOL_VALUES:
+            return False
+        raise ValueError(
+            f"Invalid value for '{name}': cannot parse '{value}' as bool "
+            f"(expected true/false/1/0/yes/no)"
+        )
+
+    raise ValueError(
+        f"Invalid value for '{name}': expected bool, got {value.__class__.__name__}"
+    )
+
+
+def is_env_template(value: str) -> bool:
+    """Return True if ``value`` is an env var template like ``${VAR}`` or ``${VAR:-default}``."""
+    return bool(_TEMPLATE_PATTERN.fullmatch(value))
+
+
+def is_sensitive_env_key(key: str) -> bool:
+    return bool(_SENSITIVE_KEY_RE.search(key))
+
+
+def is_bool_env_value(value: str) -> bool:
+    """Return True for flag values such as ``1`` or ``true``."""
+    return value.strip().lower() in _TRUE_BOOL_VALUES | _FALSE_BOOL_VALUES
+
+
+def redact_sensitive_value(value: str) -> str:
+    if len(value) <= 8:
+        return "****"
+    return value[:4] + "****" + value[-3:]
+
+
+COOKIE_HEADERS = frozenset({"cookie", "set-cookie"})
+# The only accepted credential header shape: ``${VAR}`` references, without
+# literal defaults, after an optional auth scheme and joined only by
+# separators, as in ``Bearer ${TOKEN}`` or ``Token ${KEY_ID}:${SECRET}``.
+_NO_DEFAULT_TEMPLATE = r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-)?\}"
+_TEMPLATED_CREDENTIAL_RE = re.compile(
+    rf"\s*(?:{_AUTH_SCHEME}\s+)?{_NO_DEFAULT_TEMPLATE}"
+    rf"(?:[\s:-]*{_NO_DEFAULT_TEMPLATE})*\s*"
+)
+
+
+def is_sensitive_header_name(name: str) -> bool:
+    """Return True for HTTP headers that carry credentials."""
+    return is_sensitive_env_key(name) or name.lower() in COOKIE_HEADERS
+
+
+def has_literal_header_credential(name: str, value: str) -> bool:
+    """Whether a header value holds a credential outside ``${VAR}`` references.
+
+    A credential header must match ``_TEMPLATED_CREDENTIAL_RE``. A non-empty
+    ``${VAR:-default}`` counts as a literal credential in a credential header
+    or on a sensitive variable name. Other headers may hold any literal text.
+    """
+    sensitive_header = is_sensitive_header_name(name)
+    if any(
+        default and (sensitive_header or is_sensitive_env_key(variable))
+        for variable, default in embedded_env_var_templates(value)
+    ):
+        return True
+    return (
+        sensitive_header
+        and bool(value.strip())
+        and not _TEMPLATED_CREDENTIAL_RE.fullmatch(value)
+    )
+
+
+def sensitive_header_secrets(resolved_value: str) -> set[str]:
+    """A resolved credential header's value and the credential after any auth scheme."""
+    value = resolved_value.strip()
+    scheme, separator, credential = resolved_value.lstrip().partition(" ")
+    if separator and re.fullmatch(_AUTH_SCHEME, scheme):
+        credential = credential.strip()
+        # Separators left by empty variables carry no secret.
+        return {value, credential} if credential.strip(" :-") else set()
+    return {value} if value.strip(" :-") else set()
+
+
+def embedded_env_var_templates(value: str) -> list[tuple[str, str | None]]:
+    """``(name, default_or_None)`` for each ``${VAR}`` template embedded in ``value``."""
+    return [
+        (match[1], match[2]) for match in _EMBEDDED_TEMPLATE_PATTERN.finditer(value)
+    ]
+
+
+def templatize_sensitive_env(
+    env: dict[str, str], *, sensitive_keys: Collection[str] = ()
+) -> dict[str, str]:
+    """Serialize sensitive env values for safe persistence and resume.
+
+    - Empty value or existing template: kept as-is.
+    - Non-sensitive key: literal, unless explicitly listed in ``sensitive_keys``.
+    - Sensitive key whose literal matches ``os.environ[key]``: ``${KEY}``
+      template, so resume can pull from the host env.
+    - Sensitive key otherwise: redacted; resume needs the user to re-provide it.
+    """
+    out: dict[str, str] = {}
+    for key, value in env.items():
+        if (
+            not value
+            or is_env_template(value)
+            or (key not in sensitive_keys and not is_sensitive_env_key(key))
+        ):
+            out[key] = value
+        elif os.environ.get(key) == value:
+            out[key] = f"${{{key}}}"
+        else:
+            out[key] = redact_sensitive_value(value)
+    return out
+
+
+def sanitize_env_assignment(value: str) -> str:
+    if "=" not in value:
+        return value
+
+    key, raw_value = value.split("=", 1)
+    key = key.strip()
+    raw_value = raw_value.strip()
+    if not is_sensitive_env_key(key):
+        return f"{key}={raw_value}"
+    if is_env_template(raw_value):
+        return f"{key}={raw_value}"
+    if os.environ.get(key) == raw_value:
+        return f"{key}=${{{key}}}"
+    return f"{key}={redact_sensitive_value(raw_value)}"
+
+
+def resolve_env_vars(env_dict: dict[str, str]) -> dict[str, str]:
+    """
+    Resolve environment variable templates in a dictionary.
+
+    Templates like "${VAR_NAME}" are replaced with values from os.environ.
+    Use "${VAR_NAME:-default}" to provide a default when the variable is unset.
+    Literal values are passed through unchanged.
+
+    Args:
+        env_dict: Dictionary with potentially templated values
+
+    Returns:
+        Dictionary with resolved values
+
+    Raises:
+        ValueError: If a required environment variable is not found and no default
+    """
+    resolved = {}
+
+    for key, value in env_dict.items():
+        match = _TEMPLATE_PATTERN.fullmatch(value)
+        if match:
+            var_name = match.group(1)
+            default = match.group(2)
+            if var_name in os.environ:
+                resolved[key] = os.environ[var_name]
+            elif default is not None:
+                resolved[key] = default
+            else:
+                raise ValueError(
+                    f"Environment variable '{var_name}' not found in host environment"
+                )
+        else:
+            # Literal value
+            resolved[key] = value
+
+    return resolved
+
+
+def resolve_embedded_env_vars(value: str, get_env: Callable[[str], str | None]) -> str:
+    """Expand `${VAR}` and `${VAR:-default}` within an HTTP header value.
+
+    The caller supplies its own environment lookup so agent-specific variables
+    take precedence over the host environment. No shell evaluates the value.
+    """
+    if "${" in _EMBEDDED_TEMPLATE_PATTERN.sub(" ", value):
+        raise ValueError("Invalid environment variable template")
+
+    def substitute(match: re.Match[str]) -> str:
+        name, default = match.groups()
+        if default is not None and "${" in default:
+            raise ValueError("Invalid environment variable template")
+        resolved = get_env(name)
+        if resolved is not None:
+            return resolved
+        if default is not None:
+            return default
+        raise ValueError(f"Environment variable '{name}' is not set")
+
+    return _EMBEDDED_TEMPLATE_PATTERN.sub(substitute, value)
+
+
+def get_required_host_vars(
+    env_dict: dict[str, str],
+) -> list[tuple[str, str | None]]:
+    """Extract host environment variable names referenced by templates.
+
+    Returns a list of (var_name, default_or_None) for each ``${VAR}`` or
+    ``${VAR:-default}`` entry.  Literal values are excluded.
+
+    Args:
+        env_dict: Dictionary with potentially templated values
+
+    Returns:
+        List of (var_name, default_value_or_None) tuples
+    """
+    result: list[tuple[str, str | None]] = []
+
+    for value in env_dict.values():
+        match = _TEMPLATE_PATTERN.fullmatch(value)
+        if match:
+            var_name = match.group(1)
+            default = match.group(2)  # None when no :- clause
+            result.append((var_name, default))
+
+    return result

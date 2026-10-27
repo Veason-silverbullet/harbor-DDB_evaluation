@@ -1,0 +1,852 @@
+"""Tests for the KimiCli agent."""
+
+import json
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from harbor.agents.installed.kimi_cli import (
+    KimiCli,
+    _KIMI_API_KEY_PLACEHOLDER,
+    _PendingToolCall,
+    _WireStep,
+)
+
+# Captured from real kimi-cli --wire output (simple text-only response)
+WIRE_SIMPLE = [
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnBegin","payload":{"user_input":"Say hello"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":1}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"Hello"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":" there!"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"context_usage":0.046,"token_usage":{"input_other":1247,"output":8,"input_cache_read":4864,"input_cache_creation":0},"message_id":"msg-1"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnEnd","payload":{}}}',
+    '{"jsonrpc":"2.0","id":"1","result":{"status":"finished"}}',
+]
+
+# Captured from real kimi-cli --wire output (with tool calls)
+WIRE_TOOL_CALLS = [
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnBegin","payload":{"user_input":"Read hello.py and run it"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":1}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"I\'ll read the file."}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCall","payload":{"type":"function","id":"ReadFile:0","function":{"name":"ReadFile","arguments":""},"extras":null}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":"{\\""}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":"path"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":"\\":"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":" \\"/app/hello.py"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":"\\"}"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"context_usage":0.045,"token_usage":{"input_other":1143,"output":40,"input_cache_read":4864,"input_cache_creation":0},"message_id":"msg-2"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolResult","payload":{"tool_call_id":"ReadFile:0","return_value":{"is_error":false,"output":"print(\'hello world\')\\n","message":"1 lines read","display":[],"extras":null}}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":2}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"Now let me run it."}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCall","payload":{"type":"function","id":"Shell:1","function":{"name":"Shell","arguments":""},"extras":null}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCallPart","payload":{"arguments_part":"{\\"command\\": \\"python3 hello.py\\"}"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"context_usage":0.046,"token_usage":{"input_other":205,"output":27,"input_cache_read":5888,"input_cache_creation":0},"message_id":"msg-3"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolResult","payload":{"tool_call_id":"Shell:1","return_value":{"is_error":false,"output":"hello world\\n","message":"Command executed successfully.","display":[],"extras":null}}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":3}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"The output is: hello world"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"context_usage":0.047,"token_usage":{"input_other":261,"output":20,"input_cache_read":5888,"input_cache_creation":0},"message_id":"msg-4"}}}',
+    '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnEnd","payload":{}}}',
+    '{"jsonrpc":"2.0","id":"1","result":{"status":"finished"}}',
+]
+
+
+@pytest.fixture()
+def kimi_agent(tmp_path: Path) -> KimiCli:
+    return KimiCli(logs_dir=tmp_path, model_name="moonshot/kimi-k2-0905-preview")
+
+
+class TestWireStepFinalizePendingTool:
+    def test_finalize_valid_json(self):
+        step = _WireStep(n=1)
+        step.pending_tool = _PendingToolCall(
+            call_id="tc-1", name="Shell", arguments_buffer='{"command": "ls"}'
+        )
+        step.finalize_pending_tool()
+        assert step.pending_tool is None
+        assert len(step.tool_calls) == 1
+        assert step.tool_calls[0]["arguments"] == {"command": "ls"}
+
+    def test_finalize_empty_buffer(self):
+        step = _WireStep(n=1)
+        step.pending_tool = _PendingToolCall(
+            call_id="tc-2", name="ReadFile", arguments_buffer=""
+        )
+        step.finalize_pending_tool()
+        assert step.tool_calls[0]["arguments"] == {}
+
+    def test_finalize_invalid_json(self):
+        step = _WireStep(n=1)
+        step.pending_tool = _PendingToolCall(
+            call_id="tc-3", name="Shell", arguments_buffer="not json"
+        )
+        step.finalize_pending_tool()
+        assert step.tool_calls[0]["arguments"] == {"raw": "not json"}
+
+    def test_finalize_no_pending(self):
+        step = _WireStep(n=1)
+        step.finalize_pending_tool()
+        assert len(step.tool_calls) == 0
+
+
+class TestParseWireEvents:
+    def test_parse_filters_events_only(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text("\n".join(WIRE_SIMPLE))
+        events = kimi_agent._parse_wire_events()
+        assert len(events) == 6
+        assert events[0]["type"] == "TurnBegin"
+        assert events[-1]["type"] == "TurnEnd"
+
+    def test_parse_skips_non_events(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        lines = WIRE_SIMPLE + [
+            '{"jsonrpc":"2.0","id":"1","result":{"status":"finished"}}'
+        ]
+        output_file.write_text("\n".join(lines))
+        events = kimi_agent._parse_wire_events()
+        for e in events:
+            assert "type" in e
+
+    def test_parse_empty_file(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text("")
+        assert kimi_agent._parse_wire_events() == []
+
+    def test_parse_missing_file(self, kimi_agent: KimiCli):
+        assert kimi_agent._parse_wire_events() == []
+
+
+class TestParseMultiLineToolResult:
+    """ToolResult output may contain unescaped control characters (tabs, newlines)
+    that split a single JSON-RPC message across multiple file lines."""
+
+    def test_multiline_tool_result(self, kimi_agent: KimiCli, tmp_path: Path):
+        # Simulate kimi-cli writing literal \t and \n in ToolResult output
+        lines = [
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":1}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolCall","payload":{"type":"function","id":"ReadFile:0","function":{"name":"ReadFile","arguments":"{\\"path\\":\\"/app/f.py\\"}"},"extras":null}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":100,"output":10,"input_cache_read":50,"input_cache_creation":0}}}}',
+            # ToolResult with literal tab (0x09) and newline (0x0a) in output
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"ToolResult","payload":{"tool_call_id":"ReadFile:0","return_value":{"is_error":false,"output":"     1\tdef foo():\n     2\t    pass\n","message":"ok","display":[]}}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnEnd","payload":{}}}',
+        ]
+        # Write with actual control characters in the ToolResult line
+        raw = lines[3]
+        raw = raw.replace("\\t", "\t").replace("\\n", "\n")
+        file_content = "\n".join(lines[:3]) + "\n" + raw + "\n" + lines[4]
+
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text(file_content)
+
+        events = kimi_agent._parse_wire_events()
+        tool_results = [e for e in events if e.get("type") == "ToolResult"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["payload"]["tool_call_id"] == "ReadFile:0"
+
+        steps = KimiCli._group_events_into_steps(events)
+        assert len(steps) == 1
+        assert "ReadFile:0" in steps[0].tool_results
+
+
+class TestGroupEventsIntoSteps:
+    def test_simple_response(self):
+        events = [
+            json.loads(line)["params"]
+            for line in WIRE_SIMPLE
+            if '"method":"event"' in line
+        ]
+        steps = KimiCli._group_events_into_steps(events)
+        assert len(steps) == 1
+        assert "".join(steps[0].text_parts) == "Hello there!"
+        assert steps[0].token_usage is not None
+        assert steps[0].token_usage["input_other"] == 1247
+
+    def test_tool_call_steps(self):
+        events = [
+            json.loads(line)["params"]
+            for line in WIRE_TOOL_CALLS
+            if '"method":"event"' in line
+        ]
+        steps = KimiCli._group_events_into_steps(events)
+        assert len(steps) == 3
+
+        # Step 1: ReadFile tool call
+        assert steps[0].tool_calls[0]["name"] == "ReadFile"
+        assert steps[0].tool_calls[0]["arguments"] == {"path": "/app/hello.py"}
+        assert "ReadFile:0" in steps[0].tool_results
+
+        # Step 2: Shell tool call
+        assert steps[1].tool_calls[0]["name"] == "Shell"
+        assert steps[1].tool_calls[0]["arguments"] == {"command": "python3 hello.py"}
+
+        # Step 3: text-only summary
+        assert len(steps[2].tool_calls) == 0
+        assert "hello world" in "".join(steps[2].text_parts)
+
+    def test_arguments_concatenation(self):
+        events = [
+            json.loads(line)["params"]
+            for line in WIRE_TOOL_CALLS
+            if '"method":"event"' in line
+        ]
+        steps = KimiCli._group_events_into_steps(events)
+        args = steps[0].tool_calls[0]["arguments"]
+        assert isinstance(args, dict)
+        assert "path" in args
+
+
+class TestConvertToTrajectory:
+    def test_simple_trajectory(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text("\n".join(WIRE_SIMPLE))
+        events = kimi_agent._parse_wire_events()
+        trajectory = kimi_agent._convert_events_to_trajectory(events)
+
+        assert trajectory is not None
+        assert trajectory.schema_version == "ATIF-v1.6"
+        assert trajectory.agent.name == "kimi-cli"
+        assert len(trajectory.steps) == 1
+        assert trajectory.steps[0].source == "agent"
+        assert trajectory.steps[0].message == "Hello there!"
+
+        m = trajectory.steps[0].metrics
+        assert m is not None
+        assert m.prompt_tokens == 1247 + 4864
+        assert m.completion_tokens == 8
+        assert m.cached_tokens == 4864
+
+        fm = trajectory.final_metrics
+        assert fm is not None
+        assert fm.total_prompt_tokens == 1247 + 4864
+        assert fm.total_completion_tokens == 8
+        assert fm.total_cached_tokens == 4864
+        assert fm.total_steps == 1
+
+    def test_tool_call_trajectory(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text("\n".join(WIRE_TOOL_CALLS))
+        events = kimi_agent._parse_wire_events()
+        trajectory = kimi_agent._convert_events_to_trajectory(events)
+
+        assert trajectory is not None
+        assert len(trajectory.steps) == 3
+
+        step1 = trajectory.steps[0]
+        assert step1.tool_calls is not None
+        assert len(step1.tool_calls) == 1
+        assert step1.tool_calls[0].function_name == "ReadFile"
+        assert step1.observation is not None
+        assert len(step1.observation.results) == 1
+        assert step1.observation.results[0].source_call_id == "ReadFile:0"
+
+        step2 = trajectory.steps[1]
+        assert step2.tool_calls[0].function_name == "Shell"
+
+        step3 = trajectory.steps[2]
+        assert step3.tool_calls is None
+        assert "hello world" in step3.message
+
+        fm = trajectory.final_metrics
+        assert fm is not None
+        assert fm.total_prompt_tokens == (1143 + 4864) + (205 + 5888) + (261 + 5888)
+        assert fm.total_completion_tokens == 40 + 27 + 20
+        assert fm.total_cached_tokens == 4864 + 5888 + 5888
+        assert fm.total_steps == 3
+
+    def test_cache_creation_included_in_prompt_tokens(
+        self, kimi_agent: KimiCli, tmp_path: Path
+    ):
+        lines = [
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"StepBegin","payload":{"n":1}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"ok"}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":100,"output":10,"input_cache_read":200,"input_cache_creation":300}}}}',
+            '{"jsonrpc":"2.0","method":"event","params":{"type":"TurnEnd","payload":{}}}',
+        ]
+        (tmp_path / "kimi-cli.txt").write_text("\n".join(lines))
+        events = kimi_agent._parse_wire_events()
+        trajectory = kimi_agent._convert_events_to_trajectory(events)
+
+        assert trajectory is not None
+        m = trajectory.steps[0].metrics
+        assert m is not None
+        assert m.prompt_tokens == 100 + 200 + 300
+        assert m.cached_tokens == 200
+        assert m.extra == {"input_cache_creation": 300}
+        assert trajectory.final_metrics.total_prompt_tokens == 600
+
+    def test_empty_events(self, kimi_agent: KimiCli):
+        assert kimi_agent._convert_events_to_trajectory([]) is None
+
+
+class TestPopulateContextPostRun:
+    def test_populates_context(self, kimi_agent: KimiCli, tmp_path: Path):
+        output_file = tmp_path / "kimi-cli.txt"
+        output_file.write_text("\n".join(WIRE_SIMPLE))
+
+        from harbor.models.agent.context import AgentContext
+
+        context = AgentContext()
+        kimi_agent.populate_context_post_run(context)
+
+        assert context.n_input_tokens == 1247 + 4864
+        assert context.n_output_tokens == 8
+        assert context.n_cache_tokens == 4864
+        assert (tmp_path / "trajectory.json").exists()
+
+        trajectory_data = json.loads((tmp_path / "trajectory.json").read_text())
+        assert trajectory_data["schema_version"] == "ATIF-v1.6"
+        assert trajectory_data["agent"]["name"] == "kimi-cli"
+
+    def test_no_output_file(self, kimi_agent: KimiCli):
+        from harbor.models.agent.context import AgentContext
+
+        context = AgentContext()
+        kimi_agent.populate_context_post_run(context)
+        assert context.n_input_tokens is None
+
+
+class TestMaxContextSize:
+    def test_model_info_registered_and_used(self, tmp_path: Path):
+        """model_info kwarg registers with litellm so get_model_info lookup returns it."""
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2-0905-preview",
+            api_key="sk-test",
+            model_info={"max_input_tokens": 262144, "max_output_tokens": 8192},
+        )
+        config = json.loads(
+            agent._build_config_json("moonshot", "kimi-k2-0905-preview")
+        )
+        assert config["models"]["model"]["max_context_size"] == 262144
+
+    def test_litellm_lookup(self, tmp_path: Path, monkeypatch):
+        """When no model_info kwarg, falls back to LiteLLM database lookup."""
+
+        def fake_get_model_info(model, *args, **kwargs):
+            return {"max_input_tokens": 200000, "max_tokens": 200000}
+
+        monkeypatch.setattr(
+            "harbor.agents.installed.kimi_cli.get_model_info", fake_get_model_info
+        )
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2-0905-preview",
+            api_key="sk-test",
+        )
+        config = json.loads(
+            agent._build_config_json("moonshot", "kimi-k2-0905-preview")
+        )
+        assert config["models"]["model"]["max_context_size"] == 200000
+
+    def test_fallback_when_litellm_fails(self, tmp_path: Path, monkeypatch):
+        """When LiteLLM has no info, falls back to 131072."""
+
+        def fake_get_model_info(model, *args, **kwargs):
+            raise Exception("model not found")
+
+        monkeypatch.setattr(
+            "harbor.agents.installed.kimi_cli.get_model_info", fake_get_model_info
+        )
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2-0905-preview",
+            api_key="sk-test",
+        )
+        config = json.loads(
+            agent._build_config_json("moonshot", "kimi-k2-0905-preview")
+        )
+        assert config["models"]["model"]["max_context_size"] == 131072
+
+
+class TestCreateRunCommands:
+    @pytest.mark.asyncio
+    async def test_creates_commands(self, tmp_path: Path):
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2-0905-preview",
+            api_key="sk-test",
+        )
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        await agent.run("solve the task", mock_env, AsyncMock())
+        exec_calls = mock_env.exec.call_args_list
+        assert len(exec_calls) == 2
+        assert "/tmp/kimi-config.json" in exec_calls[0].kwargs["command"]
+        run_cmd = exec_calls[1].kwargs["command"]
+        assert "--wire" in run_cmd
+        assert "--yolo" in run_cmd
+        assert "solve the task" in run_cmd
+        assert "kill 0" in run_cmd
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_model(self, tmp_path: Path):
+        agent = KimiCli(logs_dir=tmp_path, model_name=None)
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        with pytest.raises(ValueError, match="format provider/model_name"):
+            await agent.run("test", mock_env, AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsupported_provider(self, tmp_path: Path):
+        agent = KimiCli(logs_dir=tmp_path, model_name="cohere/command")
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        with pytest.raises(ValueError, match="Unsupported provider"):
+            await agent.run("test", mock_env, AsyncMock())
+
+
+class TestOpenRouterProvider:
+    """OpenRouter is reached via the OpenAI-compatible shape; the model name
+    after the first '/' is forwarded verbatim to OpenRouter (e.g.
+    'openrouter/moonshotai/kimi-k2.6' -> 'moonshotai/kimi-k2.6')."""
+
+    def test_config_uses_openai_legacy_and_openrouter_base_url(self, tmp_path: Path):
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="openrouter/moonshotai/kimi-k2.6",
+            api_key="sk-or-test",
+        )
+        config = json.loads(
+            agent._build_config_json("openrouter", "moonshotai/kimi-k2.6")
+        )
+        assert config["models"]["model"]["provider"] == "runtime"
+        provider = config["providers"]["runtime"]
+        assert provider["type"] == "openai_legacy"
+        assert provider["base_url"] == "https://openrouter.ai/api/v1"
+        assert provider["api_key"] == _KIMI_API_KEY_PLACEHOLDER
+        assert config["models"]["model"]["model"] == "moonshotai/kimi-k2.6"
+
+    def test_resolves_api_key_from_openrouter_env(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-env")
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="openrouter/moonshotai/kimi-k2.6",
+        )
+        assert agent._resolve_api_key("openrouter") == "sk-or-from-env"
+
+    @pytest.mark.asyncio
+    async def test_run_accepts_openrouter_model(self, tmp_path: Path):
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="openrouter/moonshotai/kimi-k2.6",
+            api_key="sk-or-test",
+        )
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        await agent.run("solve the task", mock_env, AsyncMock())
+        exec_calls = mock_env.exec.call_args_list
+        assert len(exec_calls) == 2
+        setup_cmd = exec_calls[0].kwargs["command"]
+        config_json = exec_calls[0].kwargs["env"]["RUNTIME_KIMI_CONFIG_JSON"]
+        assert "openrouter.ai/api/v1" in config_json
+        assert "moonshotai/kimi-k2.6" in config_json
+        assert "sk-or-test" not in setup_cmd
+        assert exec_calls[0].kwargs["env"]["RUNTIME_KIMI_API_KEY"] == "sk-or-test"
+
+    @pytest.mark.asyncio
+    async def test_run_logs_kimi_stderr(self, tmp_path: Path):
+        """kimi-cli's stderr must be captured to a log file, not discarded —
+        without this, auth failures (the 401 from OpenRouter that kicked off
+        the issue #1165 hunt) silently disappear and the trial just looks
+        like a single empty (tool use) step."""
+
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="openrouter/moonshotai/kimi-k2.6",
+            api_key="sk-or-test",
+        )
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        await agent.run("solve the task", mock_env, AsyncMock())
+        run_cmd = mock_env.exec.call_args_list[1].kwargs["command"]
+        # The kimi process itself must redirect stderr to a log file, not
+        # /dev/null. (The trailing `kill 0 2>/dev/null` cleanup line is
+        # unrelated and may discard its own stderr.)
+        assert "kimi --config-file /tmp/kimi-config.json --wire --yolo" in run_cmd
+        kimi_segment = run_cmd.split("kimi --config-file")[1].split("| (")[0]
+        assert "2>/dev/null" not in kimi_segment
+        assert "/logs/agent/kimi-cli.stderr.log" in kimi_segment
+
+
+class TestKimiCliEnvOverrideNeutralization:
+    """kimi-cli's `augment_provider_with_env_vars` silently replaces the
+    config-file api_key/base_url with OPENAI_API_KEY / OPENAI_BASE_URL (and
+    KIMI_API_KEY / KIMI_BASE_URL for type=="kimi") whenever those vars are
+    present in os.environ — which they are on hosted runtimes that inject
+    OPENAI_API_KEY globally for codex/GPT trials. The adapter neutralizes
+    this by `unset`-ing those vars in the bash that spawns kimi, so the
+    config wins regardless of how `environment.exec(env=...)` interacts
+    with the container's secret-injection layer."""
+
+    @pytest.mark.asyncio
+    async def test_run_unsets_kimi_cli_env_overrides(self, tmp_path: Path):
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="openrouter/moonshotai/kimi-k2.6",
+            api_key="sk-or-test",
+        )
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        await agent.run("solve the task", mock_env, AsyncMock())
+
+        run_cmd = mock_env.exec.call_args_list[1].kwargs["command"]
+        # The unset must run *before* kimi is invoked.
+        assert "unset" in run_cmd
+        kimi_idx = run_cmd.index("kimi --config-file")
+        unset_idx = run_cmd.index("unset ")
+        assert unset_idx < kimi_idx
+        unset_segment = run_cmd[unset_idx : run_cmd.index(";", unset_idx)]
+        for var in (
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "KIMI_API_KEY",
+            "KIMI_BASE_URL",
+        ):
+            assert var in unset_segment, (
+                f"{var} must be unset before kimi-cli starts (got: {unset_segment!r})"
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_unsets_overrides_for_kimi_provider_too(self, tmp_path: Path):
+        """The same env-override pattern affects type=='kimi' providers via
+        KIMI_API_KEY / KIMI_BASE_URL, so the unset must apply uniformly."""
+
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2-0905-preview",
+            api_key="sk-moonshot-test",
+        )
+        mock_env = AsyncMock()
+        mock_env.exec.return_value = AsyncMock(return_code=0, stdout="", stderr="")
+        await agent.run("solve the task", mock_env, AsyncMock())
+
+        run_cmd = mock_env.exec.call_args_list[1].kwargs["command"]
+        unset_segment = run_cmd[
+            run_cmd.index("unset ") : run_cmd.index(";", run_cmd.index("unset "))
+        ]
+        assert "KIMI_API_KEY" in unset_segment
+        assert "KIMI_BASE_URL" in unset_segment
+        assert "OPENAI_API_KEY" in unset_segment
+        assert "OPENAI_BASE_URL" in unset_segment
+
+
+class TestModelConnectionCompatibility:
+    @pytest.mark.parametrize("native_key", ["native-key", ""])
+    @pytest.mark.parametrize("common_url", [None, "https://override.example/v1"])
+    def test_native_key_precedes_ambient_even_with_url_override(
+        self, tmp_path, monkeypatch, native_key, common_url
+    ):
+        monkeypatch.setenv("MOONSHOT_API_KEY", "ambient-key")
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2",
+            api_key=native_key,
+            base_url=common_url,
+        )
+
+        assert agent.model_connection.api_key == native_key
+        assert agent._resolve_api_key("moonshot") == native_key
+        assert agent.model_connection.env["RUNTIME_KIMI_API_KEY"] == native_key
+
+    def test_common_key_selector_preserves_native_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MOONSHOT_API_KEY", "ambient-key")
+        agent = KimiCli(
+            logs_dir=tmp_path,
+            model_name="moonshot/kimi-k2",
+            api_key="native-key",
+            base_url="https://native.example/v1",
+            model_api_key_name="SELECTED_KEY",
+            extra_env={"SELECTED_KEY": "selected-key"},
+        )
+
+        access = agent.model_connection
+        config = json.loads(agent._build_config_json("moonshot", "kimi-k2"))
+        assert access.api_key == "selected-key"
+        assert config["providers"]["runtime"]["base_url"] == "https://native.example/v1"
+        assert access.candidate_base_url == "https://native.example/v1"
+
+    @pytest.mark.parametrize(
+        "model_api_format,client_type,endpoint",
+        [
+            (None, "openai_legacy", "https://openrouter.ai/api/v1"),
+            (
+                "openai_chat_completions",
+                "openai_legacy",
+                "https://openrouter.ai/api/v1",
+            ),
+            ("anthropic_messages", "anthropic", "https://openrouter.ai/api"),
+        ],
+    )
+    def test_format_selects_client_without_changing_inference_provider(
+        self, tmp_path, model_api_format, client_type, endpoint
+    ):
+        with patch.dict("os.environ", {}, clear=True):
+            agent = KimiCli(
+                logs_dir=tmp_path,
+                model_name="openrouter/anthropic/model:tag",
+                model_api_format=model_api_format,
+                extra_env={"OPENROUTER_API_KEY": "router-key"},
+            )
+            access = agent.model_connection
+            config = json.loads(
+                agent._build_config_json("openrouter", "anthropic/model:tag")
+            )
+
+        assert config["providers"]["runtime"]["type"] == client_type
+        assert config["providers"]["runtime"]["base_url"] == endpoint
+        assert access.candidate_base_url == endpoint
+        assert access.api_key == "router-key"
+        assert config["models"]["model"]["model"] == "anthropic/model:tag"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "gemini", "openrouter", "moonshot"])
+    async def test_run_delivers_only_the_config_credential(self, tmp_path, provider):
+        with patch.dict("os.environ", {}, clear=True):
+            agent = KimiCli(
+                logs_dir=tmp_path,
+                model_name=f"{provider}/team/model:tag",
+                model_api_key_name="SELECTED_KEY",
+                extra_env={
+                    "SELECTED_KEY": "selected-key",
+                    "GOOGLE_API_KEY": "google-key",
+                    "GEMINI_API_KEY": "gemini-key",
+                    "OPENROUTER_API_KEY": "router-key",
+                    "MOONSHOT_API_KEY": "moonshot-key",
+                },
+            )
+            environment = AsyncMock()
+            environment.exec.return_value = AsyncMock(
+                return_code=0, stdout="", stderr=""
+            )
+            await agent.run("hello", environment, AsyncMock())
+
+        for call in environment.exec.call_args_list:
+            projected = call.kwargs["env"]
+            assert {
+                name: value for name, value in projected.items() if "API_KEY" in name
+            } == {"RUNTIME_KIMI_API_KEY": "selected-key"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_api_format", ["openai_chat_completions", "anthropic_messages"]
+    )
+    async def test_router_config_serializes_to_correct_sdk_request(
+        self, tmp_path, model_api_format
+    ):
+        import httpx
+        from anthropic import APIStatusError as AnthropicAPIStatusError
+        from anthropic import AsyncAnthropic
+        from openai import APIStatusError as OpenAIAPIStatusError
+        from openai import AsyncOpenAI
+
+        requests = []
+
+        def capture(request):
+            requests.append(request)
+            return httpx.Response(
+                400,
+                json={
+                    "error": {"message": "recorded", "type": "invalid_request_error"}
+                },
+            )
+
+        with patch.dict(
+            "os.environ",
+            {"ANTHROPIC_CONFIG_DIR": str(tmp_path / "anthropic")},
+            clear=True,
+        ):
+            agent = KimiCli(
+                logs_dir=tmp_path,
+                model_name="openrouter/anthropic/model:tag",
+                model_api_format=model_api_format,
+                extra_env={"OPENROUTER_API_KEY": "router-key"},
+            )
+            config = json.loads(
+                agent._build_config_json("openrouter", "anthropic/model:tag")
+            )
+            provider = config["providers"]["runtime"]
+            model = config["models"]["model"]["model"]
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(capture)
+            ) as http:
+                client_type = (
+                    AsyncAnthropic
+                    if model_api_format == "anthropic_messages"
+                    else AsyncOpenAI
+                )
+                client = client_type(
+                    base_url=provider["base_url"],
+                    api_key=agent.model_connection.env["RUNTIME_KIMI_API_KEY"],
+                    http_client=http,
+                    max_retries=0,
+                )
+                request = (
+                    client.messages.create
+                    if model_api_format == "anthropic_messages"
+                    else client.chat.completions.create
+                )
+                # A recorded 400 terminates before generation; all HTTP is intercepted.
+                with pytest.raises(
+                    (AnthropicAPIStatusError, OpenAIAPIStatusError), match="recorded"
+                ):
+                    await request(
+                        model=model,
+                        max_tokens=1,
+                        messages=[{"role": "user", "content": "hello"}],
+                    )
+
+        assert len(requests) == 1
+        captured = requests[0]
+        assert str(captured.url) == (
+            "https://openrouter.ai/api/v1/messages"
+            if model_api_format == "anthropic_messages"
+            else "https://openrouter.ai/api/v1/chat/completions"
+        )
+        assert json.loads(captured.content)["model"] == "anthropic/model:tag"
+        if model_api_format == "anthropic_messages":
+            assert captured.headers["x-api-key"] == "router-key"
+        else:
+            assert captured.headers["authorization"] == "Bearer router-key"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Runs emitted POSIX commands")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credential_source", ["provider", "native", "selector"])
+async def test_resume_rewrites_persisted_provider_without_touching_authored_config(
+    tmp_path, monkeypatch, credential_source
+):
+    """Exercise the real setup and session commands against retained old state."""
+    import shlex
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    home = tmp_path / "home"
+    bin_dir = home / ".local/bin"
+    bin_dir.mkdir(parents=True)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    share = logs / "kimi/share"
+    session = share / "sessions/workdir/retained-session"
+    session.mkdir(parents=True)
+    (session / "context.jsonl").write_text('{"role":"user","content":"earlier"}\n')
+    state = share / "kimi.json"
+    state.write_text(
+        json.dumps(
+            {
+                "work_dirs": [{"path": str(tmp_path), "last_session_id": session.name}],
+                "authored": True,
+            }
+        )
+    )
+    config_path = tmp_path / "kimi-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "providers": {"harbor": {"api_key": "old-key"}},
+                "models": {"model": {"provider": "harbor"}},
+            }
+        )
+    )
+    config_path.chmod(0o600)
+    authored = home / ".kimi/config.toml"
+    authored.parent.mkdir()
+    authored.write_text('default_model = "authored-model"\n')
+    authored.chmod(0o640)
+    fake_cli = bin_dir / "kimi"
+    fake_cli.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "assert '--continue' in sys.argv\n"
+        "config = json.loads(pathlib.Path(sys.argv[sys.argv.index('--config-file') + 1]).read_text())\n"
+        "share = pathlib.Path(os.environ['KIMI_SHARE_DIR'])\n"
+        "assert json.loads((share / 'kimi.json').read_text())['work_dirs'][0]['last_session_id'] == 'retained-session'\n"
+        "assert json.loads(sys.stdin.readline())['params']['user_input'] == 'continue the task'\n"
+        "pathlib.Path('observed.json').write_text(json.dumps({'config': config, 'env': dict(os.environ)}))\n"
+        'print(\'{"id":"1","result":{"status":"finished"}}\', flush=True)\n'
+    )
+    fake_cli.chmod(0o755)
+    monkeypatch.setenv("MOONSHOT_API_KEY", "ambient-key")
+    kwargs = {
+        "provider": {"extra_env": {"MOONSHOT_API_KEY": "selected-key"}},
+        "native": {"api_key": "selected-key"},
+        "selector": {
+            "model_api_key_name": "SAVED_CREDENTIAL",
+            "extra_env": {"SAVED_CREDENTIAL": "selected-key"},
+        },
+    }[credential_source]
+    agent = KimiCli(logs_dir=logs, model_name="moonshot/kimi-k2", **kwargs)
+    commands = []
+
+    async def local_exec(*, command, env, **_kwargs):
+        commands.append(command)
+        command = (
+            command.replace("/tmp/kimi-config.json", str(config_path))
+            .replace("/logs/agent", str(logs))
+            .replace("uv run --no-project python", shlex.quote(sys.executable))
+        )
+        projected = {**env, "KIMI_SHARE_DIR": str(share)}
+        result = subprocess.run(
+            ["bash", "-c", command],
+            cwd=tmp_path,
+            env={"PATH": os.environ["PATH"], "HOME": str(home), **projected},
+            capture_output=True,
+            text=True,
+            start_new_session=True,
+            timeout=15,
+        )
+        return SimpleNamespace(
+            return_code=result.returncode
+            if result.returncode >= 0
+            else 128 - result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+    environment = AsyncMock()
+    environment.exec.side_effect = local_exec
+    await agent.resume("continue the task", environment, AsyncMock())
+
+    observed = json.loads((tmp_path / "observed.json").read_text())
+    assert observed["config"]["providers"]["runtime"]["api_key"] == "selected-key"
+    assert observed["config"]["models"]["model"]["provider"] == "runtime"
+    assert "harbor" not in observed["config"]["providers"]
+    assert not any("HARBOR" in name for name in observed["env"])
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    assert authored.read_text() == 'default_model = "authored-model"\n'
+    assert authored.stat().st_mode & 0o777 == 0o640
+    assert json.loads(state.read_text())["authored"] is True
+    assert (
+        session / "context.jsonl"
+    ).read_text() == '{"role":"user","content":"earlier"}\n'
+    assert agent._resume is False
+    assert len(commands) == 2
+
+
+@pytest.mark.parametrize("key", ["saved-key", ""])
+def test_persisted_explicit_credential_selector_survives_rename(
+    tmp_path, monkeypatch, key
+):
+    from harbor.agents.factory import AgentFactory
+    from harbor.models.trial.config import AgentConfig
+
+    monkeypatch.setenv("HARBOR_KIMI_API_KEY", key)
+    monkeypatch.setenv("MOONSHOT_API_KEY", "ambient-key")
+    config = AgentConfig(
+        name="kimi-cli",
+        model_name="moonshot/kimi-k2",
+        model_api_key_name="HARBOR_KIMI_API_KEY",
+        env={"HARBOR_KIMI_API_KEY": key},
+    )
+    persisted = config.model_dump_json()
+    restored = AgentConfig.model_validate_json(persisted)
+    agent = AgentFactory.create_agent_from_config(restored, logs_dir=tmp_path)
+
+    assert agent.model_connection.api_key == key
+    assert agent.model_connection.env["RUNTIME_KIMI_API_KEY"] == key
+    assert "HARBOR_KIMI_API_KEY" not in agent.model_connection.env
+    # Explicit authored overlays remain authored, including their variable names.
+    assert agent.extra_env == {"HARBOR_KIMI_API_KEY": key}
+    assert restored.model_api_key_name == "HARBOR_KIMI_API_KEY"

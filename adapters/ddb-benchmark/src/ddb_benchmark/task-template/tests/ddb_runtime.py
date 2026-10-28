@@ -241,9 +241,13 @@ async def call_anthropic_judge(
             async with client.messages.stream(**request) as stream:
                 response = await stream.get_final_message()
         except Exception as exc:
-            if (
-                "temperature" not in request
-                or not llm_judge._is_temperature_unsupported_error(exc)
+            # Anthropic SDK 2.x removed this keyword from messages.stream.
+            # Older SDKs still accept it, but the model/gateway may reject it.
+            unsupported_keyword = isinstance(exc, TypeError) and (
+                "unexpected keyword argument 'temperature'" in str(exc)
+            )
+            if "temperature" not in request or not (
+                unsupported_keyword or llm_judge._is_temperature_unsupported_error(exc)
             ):
                 raise
             request.pop("temperature")

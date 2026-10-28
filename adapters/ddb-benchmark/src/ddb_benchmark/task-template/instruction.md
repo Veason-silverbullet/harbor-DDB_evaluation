@@ -12,6 +12,9 @@ running in the foreground. It must work when invoked with `bash /app/start.sh`
 from `/app`, including starting any required backend services. Install dependencies
 before finishing. Verify the app in a browser.
 
+After verification, stop the app servers and finish any background commands before
+ending your response. The evaluator will start the app using `/app/start.sh`.
+
 For collaborative features, independent users will open the app in separate
 browser sessions. Provide the requested login, sharing, and identity flows in
 the app. If participants need distinct entry URLs, write `/app/session_urls.json`

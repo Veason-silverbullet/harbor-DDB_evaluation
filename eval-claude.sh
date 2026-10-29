@@ -15,9 +15,9 @@ export DDB_CUA_AGENT_PROTOCOL=${DDB_CUA_AGENT_PROTOCOL:-function_calling_anthrop
 export DDB_CUA_API_KEY=${DDB_CUA_API_KEY:-$CLAUDE_API_KEY}
 export DDB_CUA_MODEL=${DDB_CUA_MODEL:-$CLAUDE_MODEL}
 
-# The judge uses the gateway's Chat Completions route with the same Claude model.
+# The judge uses the same native Messages route as the CUA.
 export DDB_JUDGE_BASE_URL=${DDB_JUDGE_BASE_URL:-$CLAUDE_BASE_URL}
-export DDB_JUDGE_PROVIDER=${DDB_JUDGE_PROVIDER:-openai}
+export DDB_JUDGE_PROVIDER=${DDB_JUDGE_PROVIDER:-anthropic}
 export DDB_JUDGE_API_KEY=${DDB_JUDGE_API_KEY:-$CLAUDE_API_KEY}
 export DDB_JUDGE_MODEL=${DDB_JUDGE_MODEL:-$CLAUDE_MODEL}
 export DDB_JUDGE_MAX_TOKENS=${DDB_JUDGE_MAX_TOKENS:-32000}

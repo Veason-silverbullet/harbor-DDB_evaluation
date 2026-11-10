@@ -1,8 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Select exported task datasets; this does not run checkpoint generation.
+# Usage: bash eval-glm.sh [--ddb-mode bundled|long|lite] [harbor run options]
+DDB_MODE=${DDB_MODE:-bundled}
+if [[ ${1:-} == --ddb-mode ]]; then
+    DDB_MODE=${2:-}
+    if [[ $# -lt 2 ]]; then
+        echo "--ddb-mode requires bundled, long, or lite" >&2
+        exit 2
+    fi
+    shift 2
+fi
+case "$DDB_MODE" in
+    bundled) DDB_TASK_PATH=datasets/ddb-benchmark ;;
+    long|lite) DDB_TASK_PATH="datasets/ddb-benchmark-${DDB_MODE}" ;;
+    *) echo "Invalid DDB mode '$DDB_MODE'; choose bundled, long, or lite" >&2; exit 2 ;;
+esac
+
 source venv/bin/activate
 cd -- harbor
+
+if [[ $DDB_MODE != bundled && ! -d $DDB_TASK_PATH ]]; then
+    echo "Missing $DDB_TASK_PATH. Import the $DDB_MODE artifacts and generate Harbor tasks there first; see adapters/ddb-benchmark/README.md." >&2
+    exit 2
+fi
 
 export GLM_BASE_URL=
 export GLM_API_KEY=
@@ -28,7 +50,7 @@ GLM_AGENT_BASE_URL=${GLM_AGENT_BASE_URL%/v1}
 exec uv run --active --project adapters/ddb-benchmark harbor run \
     --yes \
     -c adapters/ddb-benchmark/run_ddb-benchmark.yaml \
-    --path datasets/ddb-benchmark \
+    --path "$DDB_TASK_PATH" \
     --n-tasks 8 \
     --n-concurrent 8 \
     -a claude-code \

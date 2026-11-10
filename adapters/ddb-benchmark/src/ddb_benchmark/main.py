@@ -11,7 +11,7 @@ def main() -> None:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        help="Override the bundled benchmark snapshot with a DDB_evaluation checkout",
+        help="Override the bundled benchmark snapshot with another snapshot or source checkout",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--data", type=Path)

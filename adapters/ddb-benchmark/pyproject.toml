@@ -9,6 +9,7 @@ dependencies = ["harbor"]
 [project.scripts]
 ddb-benchmark = "ddb_benchmark.main:main"
 ddb-benchmark-snapshot = "ddb_benchmark.snapshot:main"
+ddb-benchmark-import = "ddb_benchmark.import_stage123:main"
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14"]

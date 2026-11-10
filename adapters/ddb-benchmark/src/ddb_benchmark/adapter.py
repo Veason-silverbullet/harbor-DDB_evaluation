@@ -16,6 +16,7 @@ LOGGER = logging.getLogger(__name__)
 TEMPLATE = Path(__file__).parent / "task-template"
 BUNDLED_SOURCE = Path(__file__).parent / "snapshot"
 DEFAULT_DATA = "data/seed-queries/CN_EN_50_50_v4_atomic_stage1-3_0911.jsonl"
+DEFAULT_FIXTURES = "data/CN_EN_fixtures_0911"
 RUNTIME_DIRS = ("config", "cua", "verification", "metrics", "types_")
 RUNTIME_FILES = ("claim_builder.py", "orchestrator.py", "usage_tracker.py")
 # Standalone analysis/reporting is not part of a Harbor task's verifier.
@@ -70,7 +71,7 @@ class SeedValidationError(ValueError):
     """The serialized seed dataset cannot be used to generate evaluable tasks."""
 
 
-def _required_text(record: dict[str, Any], field: str, context: str) -> str:
+def _required_text(record: dict[Any, Any], field: str, context: str) -> str:
     value = record.get(field)
     if not isinstance(value, str) or not value.strip():
         raise SeedValidationError(f"{context}: {field} must be a non-empty string")
@@ -132,6 +133,23 @@ def load_records(data_path: Path) -> dict[str, dict[str, Any]]:
     return records
 
 
+def load_dataset_provenance(data_path: Path) -> dict[str, Any] | None:
+    """Read optional generation metadata stored alongside a seed JSONL file."""
+    path = data_path.with_suffix(".provenance.json")
+    if not path.exists():
+        return None
+    metadata = json.loads(path.read_text())
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Expected a provenance object: {path}")
+    expected = metadata.get("dataset_sha256")
+    if (
+        expected is not None
+        and expected != hashlib.sha256(data_path.read_bytes()).hexdigest()
+    ):
+        raise ValueError(f"Dataset does not match its provenance checksum: {data_path}")
+    return metadata
+
+
 def copy_runtime(runtime: Path, destination: Path) -> None:
     """Copy only evaluator code and prompts, removing the hosted-preview token."""
     destination.mkdir(parents=True, exist_ok=True)
@@ -168,7 +186,7 @@ class DDBBenchmarkAdapter:
         source_dir = (source_dir or BUNDLED_SOURCE).resolve()
         self.output_dir = output_dir.resolve()
         self.data_path = data_path or source_dir / DEFAULT_DATA
-        self.fixtures_dir = fixtures_dir or source_dir / "data/CN_EN_fixtures_0911"
+        self.fixtures_dir = fixtures_dir or source_dir / DEFAULT_FIXTURES
         self.runtime = source_dir / "deepdiver-evaluation/level1-func"
 
     def prepare_tasks(
@@ -180,6 +198,7 @@ class DDBBenchmarkAdapter:
         if limit is not None and limit < 1:
             raise ValueError("limit must be positive")
         records = load_records(self.data_path)
+        self.dataset_provenance = load_dataset_provenance(self.data_path)
         selected = list(dict.fromkeys(task_ids)) if task_ids is not None else list(records)
         unknown = set(selected) - records.keys()
         if unknown:
@@ -243,6 +262,11 @@ class DDBBenchmarkAdapter:
                 json.dumps(
                     {
                         "dataset": self.data_path.name,
+                        **(
+                            {"generation": self.dataset_provenance}
+                            if self.dataset_provenance is not None
+                            else {}
+                        ),
                         "missing_fixtures": missing,
                         "sha256": hashes,
                     },
